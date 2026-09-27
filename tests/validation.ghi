@@ -1,0 +1,240 @@
+namespace tests
+import arm092.validation.ConfigError
+import arm092.validation.Validator
+import arm092.validation.Violation
+import math "go:math"
+import strconv "go:strconv"
+
+import testing "go:testing"
+
+func TestRequestJournalValuesAndInclusiveBounds(t *testing.T) {
+	check := new Validator()
+	check.RequiredText("title", "Հայ🙂")
+	check.TextLength("title", "Հայ🙂", 4, 4)
+	check.OneOf("status", "open", []string{
+		"open",
+		"in_progress",
+		"resolved",
+	})
+	check.IntRange("offset", 0, 0, math.MaxInt)
+	check.IntRange("page", 1, 1, 10000)
+	check.IntRange("per_page", 100, 1, 100)
+	check.NumberRange("rating", 0.5, 0.5, 1.0)
+	check.NumberRange("upper_rating", 1.0, 0.5, 1.0)
+	check.TextLength("optional", "", 0, 0)
+	if !check.Valid() || len(check.Errors()) != 0 {
+		t.Fatal("valid request values failed")
+	}
+}
+
+func TestViolationsAggregateByFieldAndCallOrder(t *testing.T) {
+	check := new Validator()
+	check.RequiredText("title", " ")
+	check.TextLength("title", " ", 2, 10)
+	check.OneOf("status", "unknown", []string{
+		"open",
+		"closed",
+	})
+	check.IntRange("page", 0, 1, 100)
+	check.IntRange("per_page", 101, 1, 100)
+	errors := check.Errors()
+	if check.Valid() || len(errors) != 5 {
+		t.Fatal("violations were not aggregated")
+	}
+	fields := []string{
+		"title",
+		"title",
+		"status",
+		"page",
+		"per_page",
+	}
+	codes := []string{
+		"required",
+		"min_length",
+		"one_of",
+		"min_value",
+		"max_value",
+	}
+	for i, error := range errors {
+		if error.Field() != fields[i] || error.Code() != codes[i] {
+			t.Fatal("violation order or metadata changed")
+		}
+	}
+	if len(check.ForField("title")) != 2 || len(check.ForField("missing")) != 0 {
+		t.Fatal("field grouping failed")
+	}
+}
+
+func TestUnicodeLengthUsesCodePointsAndPreservesWhitespace(t *testing.T) {
+	check := new Validator()
+	check.TextLength("emoji", "🙂", 1, 1)
+	check.TextLength("combining", "e\u0301", 2, 2)
+	check.RequiredText("title", "  x  ")
+	if !check.Valid() {
+		t.Fatal("Unicode length used bytes or trimmed content")
+	}
+	check.TextLength("too_short", "Հայ🙂", 5, 6)
+	check.TextLength("too_long", "Հայ🙂", 0, 3)
+	check.TextLength("spaces", "  x  ", 0, 1)
+	if len(check.Errors()) != 3 || check.ForField("too_long") [0].Code() != "max_length" {
+		t.Fatal("Unicode limits failed")
+	}
+}
+
+func TestRequiredTextHandlesUnicodeWhitespace(t *testing.T) {
+	check := new Validator()
+	check.RequiredText("empty", "")
+	check.RequiredText("space", "\t\n\u2003")
+	check.RequiredText("value", "\u2003x\u2003")
+	if len(check.Errors()) != 2 {
+		t.Fatal("required text whitespace semantics failed")
+	}
+}
+
+func TestAllowedValuesAreExactAndIndependentOfRequired(t *testing.T) {
+	check := new Validator()
+	check.OneOf("empty", "", []string{
+		"",
+		"open",
+	})
+	check.OneOf("duplicate", "open", []string{
+		"open",
+		"open",
+	})
+	check.OneOf("case", "Open", []string{
+		"open",
+	})
+	check.OneOf("space", " open ", []string{
+		"open",
+	})
+	if len(check.Errors()) != 2 {
+		t.Fatal("allowed values were normalized or empty value was implicitly required")
+	}
+}
+
+func TestIntegerRangeDoesNotConvertThroughFloatingPoint(t *testing.T) {
+	check := new Validator()
+	check.IntRange("lower", - 5, - 5, 5)
+	check.IntRange("upper", 5, - 5, 5)
+	check.IntRange("below", - 6, - 5, 5)
+	check.IntRange("above", 6, - 5, 5)
+	if len(check.Errors()) != 2 {
+		t.Fatal("inclusive integer range failed")
+	}
+	if strconv.IntSize == 64 {
+		wide := int64(9007199254740993)
+		value := int(wide)
+		check.IntRange("large_valid", value, value, value)
+		check.IntRange("large_invalid", value + 1, value, value)
+		if len(check.ForField("large_valid")) != 0 || len(check.ForField("large_invalid")) != 1 {
+			t.Fatal("large integer precision was lost")
+		}
+	}
+}
+
+func TestNumberRangeRejectsNonFiniteValues(t *testing.T) {
+	check := new Validator()
+	check.NumberRange("low", - 1.5, - 1.0, 1.0)
+	check.NumberRange("high", 1.5, - 1.0, 1.0)
+	check.NumberRange("nan", math.NaN(), - 1.0, 1.0)
+	check.NumberRange("positive_inf", math.Inf(1), - 1.0, 1.0)
+	check.NumberRange("negative_inf", math.Inf(- 1), - 1.0, 1.0)
+	errors := check.Errors()
+	if len(errors) != 5 || errors[0].Code() != "min_value" || errors[1].Code() != "max_value" {
+		t.Fatal("number range failed")
+	}
+	for i := 2; i < len(errors); i++ {
+		if errors[i].Code() != "invalid_number" {
+			t.Fatal("non-finite number was accepted")
+		}
+	}
+}
+
+func TestInvalidUTF8HasStableViolation(t *testing.T) {
+	check := new Validator()
+	check.TextLength("title", string([]byte{
+		0xff,
+	}), 0, 10)
+	if len(check.Errors()) != 1 || check.Errors() [0].Code() != "invalid_utf8" {
+		t.Fatal("invalid UTF-8 was counted as valid text")
+	}
+}
+
+func TestErrorSnapshotsCannotMutateValidator(t *testing.T) {
+	check := new Validator()
+	check.RequiredText("title", "")
+	first := check.Errors()
+	first[0] = new Violation("other", "other")
+	group := check.ForField("title")
+	group[0] = new Violation("other", "other")
+	check.IntRange("page", 0, 1, 100)
+	if len(first) != 1 || check.Errors() [0].Field() != "title" || len(check.ForField("title")) != 1 {
+		t.Fatal("returned slice exposed internal state")
+	}
+}
+
+func TestInvalidRuleConfigurationDoesNotBecomeInputError(t *testing.T) {
+	check := new Validator()
+	caught := 0
+	try {
+		check.TextLength("title", "x", - 1, 10)
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.TextLength("title", "x", 10, 1)
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.OneOf("status", "open", []string{})
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.IntRange("page", 1, 10, 1)
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.NumberRange("rating", 1.0, math.NaN(), 10.0)
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.NumberRange("rating", 1.0, 0.0, math.Inf(1))
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.NumberRange("rating", 1.0, 10.0, 0.0)
+	} catch err ConfigError {
+		caught++
+	}
+	try {
+		check.RequiredText(" ", "x")
+	} catch err ConfigError {
+		caught++
+	}
+	if caught != 8 || !check.Valid() {
+		t.Fatal("rule configuration errors were lost or added as violations")
+	}
+}
+
+func TestExplicitApplicationViolationUsesSameErrorBag(t *testing.T) {
+	check := new Validator()
+	check.Reject("title", "nul_character")
+	check.IntRange("limit", 0, 1, 100)
+	if len(check.Errors()) != 2 || check.ForField("title") [0].Code() != "nul_character" {
+		t.Fatal("custom application constraint was not aggregated")
+	}
+	failed := false
+	try {
+		check.Reject("title", " ")
+	} catch err ConfigError {
+		failed = true
+	}
+	if !failed || len(check.Errors()) != 2 {
+		t.Fatal("blank custom code was accepted")
+	}
+}

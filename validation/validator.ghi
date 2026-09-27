@@ -1,0 +1,148 @@
+namespace arm092.validation
+
+import math "go:math"
+import strings "go:strings"
+import utf8 "go:unicode/utf8"
+
+func validationField(field string) {
+	if strings.TrimSpace(field) == "" {
+		throw new ConfigError("Validation field must not be blank")
+	}
+}
+
+class ConfigError extends Exception {
+	constructor(message string) {
+		parent(message)
+	}
+}
+
+class Violation {
+	private field string
+	private code string
+
+	constructor(field string, code string) {
+		this.field = field
+		this.code = code
+	}
+
+	public func Field() string {
+		return this.field
+	}
+	public func Code() string {
+		return this.code
+	}
+}
+
+class Validator {
+	private violations []Violation
+
+	constructor() {
+		this.violations = []Violation{}
+	}
+
+	private func add(field string, code string) {
+		this.violations = append(this.violations, new Violation(field, code))
+	}
+
+	public func Reject(field string, code string) {
+		validationField(field)
+		if strings.TrimSpace(code) == "" {
+			throw new ConfigError("Validation code must not be blank")
+		}
+		this.add(field, code)
+	}
+
+	public func RequiredText(field string, value string) {
+		validationField(field)
+		if strings.TrimSpace(value) == "" {
+			this.add(field, "required")
+		}
+	}
+
+	public func TextLength(field string, value string, minimum int, maximum int) {
+		validationField(field)
+		if minimum < 0 || maximum < minimum {
+			throw new ConfigError("Text length bounds must satisfy 0 <= minimum <= maximum")
+		}
+		if !utf8.ValidString(value) {
+			this.add(field, "invalid_utf8")
+
+			return
+		}
+		length := utf8.RuneCountInString(value)
+		if length < minimum {
+			this.add(field, "min_length")
+		}
+		if length > maximum {
+			this.add(field, "max_length")
+		}
+	}
+
+	public func OneOf(field string, value string, allowed []string) {
+		validationField(field)
+		if len(allowed) == 0 {
+			throw new ConfigError("Allowed values must not be empty")
+		}
+		for _, candidate := range allowed {
+			if value == candidate {
+				return
+			}
+		}
+		this.add(field, "one_of")
+	}
+
+	public func IntRange(field string, value int, minimum int, maximum int) {
+		validationField(field)
+		if maximum < minimum {
+			throw new ConfigError("Integer range minimum must not exceed maximum")
+		}
+		if value < minimum {
+			this.add(field, "min_value")
+		}
+		if value > maximum {
+			this.add(field, "max_value")
+		}
+	}
+
+	public func NumberRange(field string, value float64, minimum float64, maximum float64) {
+		validationField(field)
+		if math.IsNaN(minimum) || math.IsNaN(maximum) || math.IsInf(minimum, 0) || math.IsInf(maximum, 0) || maximum < minimum {
+			throw new ConfigError("Number range bounds must be finite and minimum must not exceed maximum")
+		}
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			this.add(field, "invalid_number")
+
+			return
+		}
+		if value < minimum {
+			this.add(field, "min_value")
+		}
+		if value > maximum {
+			this.add(field, "max_value")
+		}
+	}
+
+	public func Valid() bool {
+		return len(this.violations) == 0
+	}
+
+	public func Errors() []Violation {
+		result := []Violation{}
+		for _, violation := range this.violations {
+			result = append(result, violation)
+		}
+
+		return result
+	}
+
+	public func ForField(field string) []Violation {
+		result := []Violation{}
+		for _, violation := range this.violations {
+			if violation.Field() == field {
+				result = append(result, violation)
+			}
+		}
+
+		return result
+	}
+}

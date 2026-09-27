@@ -1,0 +1,6 @@
+.ghi/
+work/
+outputs/
+docs/process/
+AGENTS.md
+*.exe
